@@ -2,6 +2,7 @@ import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = process.env.PORT || 3000;
+
 const rooms = new Map();
 
 const server = http.createServer((req, res) => {
@@ -11,11 +12,13 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
+
 function send(socket, data) {
 	if (socket.readyState === WebSocket.OPEN) {
 		socket.send(JSON.stringify(data));
 	}
 }
+
 
 function generateRoomCode() {
 	const letters = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -36,19 +39,49 @@ function generateRoomCode() {
 	return code;
 }
 
+
+function assignSides(room) {
+	if (room.selected_side === "tiger") {
+		room.host_side = "tiger";
+		room.guest_side = "goat";
+		return;
+	}
+
+	if (room.selected_side === "goat") {
+		room.host_side = "goat";
+		room.guest_side = "tiger";
+		return;
+	}
+
+	const hostGetsTigers = Math.random() < 0.5;
+
+	room.host_side = hostGetsTigers ? "tiger" : "goat";
+	room.guest_side = hostGetsTigers ? "goat" : "tiger";
+}
+
+
 wss.on("connection", (socket) => {
+	console.log("Client connected");
+
 	socket.on("message", (raw) => {
 		let message;
 
 		try {
 			message = JSON.parse(raw.toString());
-		} catch {
+		}
+		catch {
 			send(socket, {
 				type: "error",
 				message: "Invalid message"
 			});
+
 			return;
 		}
+
+
+		// ====================================================
+		// CREATE ROOM
+		// ====================================================
 
 		if (message.type === "create_room") {
 			let roomCode = generateRoomCode();
@@ -57,25 +90,52 @@ wss.on("connection", (socket) => {
 				roomCode = generateRoomCode();
 			}
 
+			const selectedSide = [
+				"tiger",
+				"goat",
+				"random"
+			].includes(message.selected_side)
+				? message.selected_side
+				: "random";
+
 			rooms.set(roomCode, {
 				host: socket,
 				guest: null,
-				theme_id: message.theme_id ?? "basic"
+
+				theme_id: message.theme_id ?? "basic",
+				selected_side: selectedSide,
+
+				host_side: "",
+				guest_side: ""
 			});
 
 			socket.roomCode = roomCode;
-			socket.role = "host";
+			socket.roomRole = "host";
 
 			send(socket, {
 				type: "room_created",
 				code: roomCode
 			});
 
+			console.log(
+				`Room created: ${roomCode}, selected side: ${selectedSide}`
+			);
+
 			return;
 		}
 
+
+		// ====================================================
+		// JOIN ROOM
+		// ====================================================
+
 		if (message.type === "join_room") {
-			const roomCode = String(message.code ?? "").toUpperCase();
+			const roomCode = String(
+				message.code ?? ""
+			)
+				.trim()
+				.toUpperCase();
+
 			const room = rooms.get(roomCode);
 
 			if (!room) {
@@ -83,6 +143,7 @@ wss.on("connection", (socket) => {
 					type: "join_failed",
 					message: "Room not found"
 				});
+
 				return;
 			}
 
@@ -91,17 +152,36 @@ wss.on("connection", (socket) => {
 					type: "join_failed",
 					message: "Room is full"
 				});
+
 				return;
 			}
 
 			room.guest = socket;
 
 			socket.roomCode = roomCode;
-			socket.role = "guest";
+			socket.roomRole = "guest";
 
-			send(socket, {
-				type: "room_joined",
+			assignSides(room);
+
+			send(room.host, {
+				type: "room_ready",
+
 				code: roomCode,
+
+				your_side: room.host_side,
+				opponent_side: room.guest_side,
+
+				theme_id: room.theme_id
+			});
+
+			send(room.guest, {
+				type: "room_ready",
+
+				code: roomCode,
+
+				your_side: room.guest_side,
+				opponent_side: room.host_side,
+
 				theme_id: room.theme_id
 			});
 
@@ -110,11 +190,88 @@ wss.on("connection", (socket) => {
 				code: roomCode
 			});
 
+			console.log(
+				`Room ready: ${roomCode} | ` +
+				`host=${room.host_side} | ` +
+				`guest=${room.guest_side}`
+			);
+
 			return;
 		}
+
+
+		// ====================================================
+		// LEAVE ROOM
+		// ====================================================
+
+		if (message.type === "leave_room") {
+			const roomCode = socket.roomCode;
+
+			if (!roomCode) {
+				return;
+			}
+
+			const room = rooms.get(roomCode);
+
+			if (!room) {
+				return;
+			}
+
+			if (socket.roomRole === "host") {
+				if (room.guest) {
+					send(room.guest, {
+						type: "room_closed"
+					});
+				}
+
+				rooms.delete(roomCode);
+
+				socket.roomCode = null;
+				socket.roomRole = null;
+
+				console.log(`Room closed: ${roomCode}`);
+
+				return;
+			}
+
+			if (socket.roomRole === "guest") {
+				room.guest = null;
+
+				room.host_side = "";
+				room.guest_side = "";
+
+				send(room.host, {
+					type: "player_left"
+				});
+
+				socket.roomCode = null;
+				socket.roomRole = null;
+
+				console.log(`Guest left room: ${roomCode}`);
+
+				return;
+			}
+		}
+
+
+		// ====================================================
+		// UNKNOWN MESSAGE
+		// ====================================================
+
+		send(socket, {
+			type: "error",
+			message: "Unknown message type"
+		});
 	});
 
+
+	// ========================================================
+	// DISCONNECT
+	// ========================================================
+
 	socket.on("close", () => {
+		console.log("Client disconnected");
+
 		const roomCode = socket.roomCode;
 
 		if (!roomCode) {
@@ -127,7 +284,7 @@ wss.on("connection", (socket) => {
 			return;
 		}
 
-		if (socket.role === "host") {
+		if (socket.roomRole === "host") {
 			if (room.guest) {
 				send(room.guest, {
 					type: "room_closed"
@@ -135,19 +292,36 @@ wss.on("connection", (socket) => {
 			}
 
 			rooms.delete(roomCode);
+
+			console.log(
+				`Host disconnected. Room removed: ${roomCode}`
+			);
+
 			return;
 		}
 
-		if (socket.role === "guest") {
+		if (socket.roomRole === "guest") {
 			room.guest = null;
+
+			room.host_side = "";
+			room.guest_side = "";
 
 			send(room.host, {
 				type: "player_left"
 			});
+
+			console.log(
+				`Guest disconnected from room: ${roomCode}`
+			);
 		}
 	});
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-	console.log(`Server running on port ${PORT}`);
-});
+
+server.listen(
+	PORT,
+	"0.0.0.0",
+	() => {
+		console.log(`Server running on port ${PORT}`);
+	}
+);
