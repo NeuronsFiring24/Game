@@ -255,6 +255,52 @@ wss.on("connection", (socket) => {
 
 
 		// ====================================================
+		// GAME MOVE
+		// ====================================================
+
+		if (message.type === "move") {
+			const roomCode = socket.roomCode;
+
+			if (!roomCode) {
+				send(socket, {
+					type: "error",
+					message: "You are not in a room"
+				});
+				return;
+			}
+
+			const room = rooms.get(roomCode);
+
+			if (!room) {
+				send(socket, {
+					type: "error",
+					message: "Room not found"
+				});
+				return;
+			}
+
+			const opponent =
+				socket.roomRole === "host"
+					? room.guest
+					: room.host;
+
+			if (!opponent) {
+				send(socket, {
+					type: "error",
+					message: "Opponent is not connected"
+				});
+				return;
+			}
+
+			send(opponent, {
+				type: "move",
+				move: message.move
+			});
+
+			return;
+		}
+
+		// ====================================================
 		// UNKNOWN MESSAGE
 		// ====================================================
 
